@@ -8634,6 +8634,7 @@ impl Render for Shell {
             cx.window_appearance(),
             gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight
         );
+        let compositor = cx.compositor_name();
         let project = &self.workspace.project;
         let animate = !cx.reduce_motion()
             && self
@@ -8646,7 +8647,7 @@ impl Render for Shell {
             .get(project)
             .and_then(|a| a.theme.as_ref());
         // Repainting bypasses cached views, so every surface follows the blend.
-        if configure_project(p, project_theme, system_light, animate) {
+        if configure_project(p, project_theme, system_light, animate, compositor) {
             cx.refresh_windows();
         }
         if tweening() {
@@ -8655,10 +8656,10 @@ impl Render for Shell {
         if self.theme_project.as_ref() != Some(project) {
             self.theme_project = Some(project.clone());
         }
-        let glass = window_glass(p, system_light);
+        let glass = window_glass(p, system_light, compositor);
         if self.window_glass != Some(glass) {
             self.window_glass = Some(glass);
-            window.set_background_appearance(crate::theme::window_backdrop(glass));
+            window.set_background_appearance(crate::theme::window_backdrop(glass, compositor));
         }
         self.sync_settings(cx);
         self.sidebar_fraction = match &self.sidebar_slide {
@@ -11393,7 +11394,7 @@ mod tests {
 
     #[gpui::test]
     fn new_boxy_layout_runs_the_sidebar_and_workspace_full_height(cx: &mut TestAppContext) {
-        crate::theme::configure(&crate::settings::Preferences::default(), false);
+        crate::theme::configure(&crate::settings::Preferences::default(), false, "");
         let (window, _, _) = window(cx);
         let frames = |cx: &mut TestAppContext| {
             cx.update_window(window.into(), |_, w, cx| {

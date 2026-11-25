@@ -3617,7 +3617,7 @@ mod composer_motion_tests {
         cx: &mut TestAppContext,
     ) {
         let preferences = crate::settings::Preferences::default();
-        crate::theme::configure(&preferences, false);
+        crate::theme::configure(&preferences, false, "");
         cx.update(|cx| {
             cx.set_global(preferences);
             cx.set_reduce_motion(true);

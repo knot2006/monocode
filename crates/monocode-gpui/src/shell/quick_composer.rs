@@ -82,6 +82,7 @@ impl Shell {
             }
             None => gpui::Bounds::centered(None, size, cx),
         };
+        let window_background = crate::theme::window_backdrop(true, cx.compositor_name());
         let handle = cx.open_window(
             gpui::WindowOptions {
                 window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
@@ -90,7 +91,7 @@ impl Shell {
                 titlebar: None,
                 is_resizable: false,
                 is_minimizable: false,
-                window_background: crate::theme::window_backdrop(true),
+                window_background,
                 app_id: Some("dev.usemono.quick-composer".into()),
                 ..Default::default()
             },

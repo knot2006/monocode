@@ -565,7 +565,7 @@ impl Monos {
             kind: WindowKind::PopUp,
             is_minimizable: false,
             display_id: display.map(|d| d.id()),
-            window_background: crate::theme::window_backdrop(!is_light()),
+            window_background: crate::theme::window_backdrop(!is_light(), cx.compositor_name()),
             app_id: Some("dev.usemono.mono-chat".into()),
             ..Default::default()
         };

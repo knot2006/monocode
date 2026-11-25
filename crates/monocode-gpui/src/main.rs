@@ -468,7 +468,7 @@ fn main() {
                     // Linux desktops match this to the .desktop file's
                     // StartupWMClass to show the app icon.
                     app_id: Some("dev.usemono.gpui".into()),
-                    window_background: theme::window_backdrop(true),
+                    window_background: theme::window_backdrop(true, cx.compositor_name()),
                     // GPUI owns the custom chrome. AppKit must not reinterpret
                     // its controls as native titlebar double-click/drag gestures.
                     app_owns_titlebar_drag: cfg!(target_os = "macos"),

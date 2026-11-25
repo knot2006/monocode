@@ -62,8 +62,12 @@ thread_local! {
 const TWEEN_LENGTH: std::time::Duration = std::time::Duration::from_millis(360);
 
 #[cfg(test)]
-pub(crate) fn configure(p: &crate::settings::Preferences, system_light: bool) -> bool {
-    configure_project(p, None, system_light, false)
+pub(crate) fn configure(
+    p: &crate::settings::Preferences,
+    system_light: bool,
+    compositor: &str,
+) -> bool {
+    configure_project(p, None, system_light, false, compositor)
 }
 /// Paint with `project`'s colors in place of the app-wide ones. With
 /// `animate`, a change of colors blends from what is on screen; call again
@@ -74,6 +78,7 @@ pub(crate) fn configure_project(
     project: Option<&monocode_core::project_appearance::ProjectTheme>,
     system_light: bool,
     animate: bool,
+    compositor: &str,
 ) -> bool {
     let light = p.theme == "light" || (p.theme == "system" && system_light);
     let (workspace_theme, accent_color, hue, saturation, dark_lightness) = match project {
@@ -93,7 +98,7 @@ pub(crate) fn configure_project(
         ),
     };
     let palette = crate::settings::palette(workspace_theme, light);
-    let glass = window_glass(p, system_light);
+    let glass = window_glass(p, system_light, compositor);
     // Both layouts derive their surface roles from the same saved settings.
     let shell = gpui::hsla(
         hue.min(360) as f32 / 360.,
@@ -200,16 +205,25 @@ impl Tokens {
     }
 }
 
-/// Platforms whose compositor blurs the desktop behind the window: macOS
-/// vibrancy and Windows Acrylic. Linux blur is compositor-dependent, so it
-/// stays opaque rather than exposing the raw desktop.
+/// Platforms whose compositor always blurs the desktop behind the window: macOS
+/// vibrancy and Windows Acrylic. On Linux, glass depends on a Wayland or X11 compositor.
 pub(crate) const GLASS_PLATFORM: bool = cfg!(any(target_os = "macos", target_os = "windows"));
-pub(crate) fn window_glass(p: &crate::settings::Preferences, system_light: bool) -> bool {
-    GLASS_PLATFORM && p.theme != "light" && !(p.theme == "system" && system_light)
+pub(crate) fn glass_supported(compositor: &str) -> bool {
+    GLASS_PLATFORM || (cfg!(target_os = "linux") && matches!(compositor, "Wayland" | "X11"))
+}
+pub(crate) fn window_glass(
+    p: &crate::settings::Preferences,
+    system_light: bool,
+    compositor: &str,
+) -> bool {
+    glass_supported(compositor) && p.theme != "light" && !(p.theme == "system" && system_light)
 }
 /// What the compositor puts behind a window that does or doesn't paint glass.
-pub(crate) fn window_backdrop(glass: bool) -> gpui::WindowBackgroundAppearance {
-    if glass && GLASS_PLATFORM {
+pub(crate) fn window_backdrop(
+    glass: bool,
+    compositor: &str,
+) -> gpui::WindowBackgroundAppearance {
+    if glass && glass_supported(compositor) {
         gpui::WindowBackgroundAppearance::Blurred
     } else {
         gpui::WindowBackgroundAppearance::Opaque
@@ -662,17 +676,88 @@ pub(crate) fn diff_background(add: bool, gutter: bool) -> Hsla {
 mod composer_tests {
     use super::*;
 
+    struct Restore(Option<Tokens>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TOKENS.with(|tokens| *tokens.borrow_mut() = self.0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
-    fn composer_surface_matches_react_dark_ink_and_solid_light_background() {
-        struct Restore(Option<Tokens>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                TOKENS.with(|tokens| *tokens.borrow_mut() = self.0);
+    fn linux_glass_follows_theme_on_wayland_and_x11() {
+        let mut preferences = crate::settings::Preferences::default();
+        for (theme, system_light, expected) in [
+            ("dark", false, true),
+            ("dark", true, true),
+            ("light", false, false),
+            ("light", true, false),
+            ("system", false, true),
+            ("system", true, false),
+        ] {
+            preferences.theme = theme.into();
+            for compositor in ["Wayland", "X11"] {
+                assert_eq!(
+                    window_glass(&preferences, system_light, compositor),
+                    expected
+                );
+            }
+            for compositor in ["headless", ""] {
+                assert!(!window_glass(&preferences, system_light, compositor));
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_surface_alpha_tracks_saved_opacity_and_main_pane_glass() {
+        let _restore = Restore(TOKENS.with(|tokens| *tokens.borrow()));
+        for compositor in ["Wayland", "X11"] {
+            let mut preferences = crate::settings::Preferences {
+                theme: "dark".into(),
+                ..Default::default()
+            };
+            for (opacity, alpha) in [(0, 0.15), (15, 0.15), (40, 0.4), (100, 1.), (200, 1.)] {
+                preferences.sidebar_opacity = opacity;
+                configure(&preferences, false, compositor);
+                assert_eq!(shell_fill().a, alpha);
+                assert_eq!(pane_fill().a, 0.28);
+                assert_eq!(inset_pane_fill().a, 0.);
+            }
+
+            preferences.sidebar_opacity = 40;
+            preferences.body_glass = false;
+            configure(&preferences, false, compositor);
+            assert_eq!(shell_fill().a, 0.4);
+            assert_eq!(pane_fill().a, 1.);
+            assert_eq!(inset_pane_fill().a, 1.);
+
+            preferences.theme = "light".into();
+            preferences.body_glass = true;
+            configure(&preferences, false, compositor);
+            assert_eq!(shell_fill().a, 1.);
+            assert_eq!(pane_fill().a, 1.);
+            assert_eq!(inset_pane_fill().a, 1.);
+            assert_eq!(preferences.sidebar_opacity, 40);
+            assert!(preferences.body_glass);
+
+            preferences.theme = "dark".into();
+            configure(&preferences, false, compositor);
+            assert_eq!(shell_fill().a, 0.4);
+            assert_eq!(inset_pane_fill().a, 0.);
+
+            configure(&preferences, false, "headless");
+            assert_eq!(shell_fill().a, 1.);
+            assert_eq!(pane_fill().a, 1.);
+            assert_eq!(inset_pane_fill().a, 1.);
+        }
+    }
+
+    #[test]
+    fn composer_surface_matches_react_dark_ink_and_solid_light_background() {
         let _restore = Restore(TOKENS.with(|tokens| *tokens.borrow()));
         let mut preferences = crate::settings::Preferences::default();
-        configure(&preferences, false);
+        configure(&preferences, false, "");
         assert_eq!(composer_fill(), content(0.03));
         assert_eq!(composer_blur(), 24.);
         assert_eq!(composer_border(false), content(0.1));
@@ -681,7 +766,7 @@ mod composer_tests {
         preferences.theme = "light".into();
         preferences.theme_hue = 180;
         preferences.theme_saturation = 20;
-        configure(&preferences, false);
+        configure(&preferences, false, "");
         assert_eq!(composer_fill(), gpui::hsla(0.5, 0.2, 0.97, 1.));
         assert_eq!(composer_blur(), 0.);
         assert_eq!(composer_border(false), content(0.1));
@@ -691,7 +776,7 @@ mod composer_tests {
     #[test]
     fn project_colors_replace_the_app_colors_and_blend_in() {
         let preferences = crate::settings::Preferences::default();
-        configure(&preferences, false);
+        configure(&preferences, false, "");
         let app_accent = accent_color();
         let theme = monocode_core::project_appearance::ProjectTheme {
             accent_color: Some("#ef4444".into()),
@@ -699,18 +784,24 @@ mod composer_tests {
             saturation: 40,
             ..Default::default()
         };
-        assert!(configure_project(&preferences, Some(&theme), false, true));
+        assert!(configure_project(
+            &preferences,
+            Some(&theme),
+            false,
+            true,
+            ""
+        ));
         assert!(tweening());
         // The blend starts from the colors on screen.
         assert_eq!(accent_color(), app_accent);
         std::thread::sleep(TWEEN_LENGTH);
-        configure_project(&preferences, Some(&theme), false, true);
+        configure_project(&preferences, Some(&theme), false, true, "");
         assert!(!tweening());
         assert_eq!(accent_color(), rgb(0xef4444).into());
         assert_eq!(picked_accent(), rgb(0xef4444).into());
         assert_eq!(shell_fill().h, 20. / 360.);
         // Without animation the app colors return at once.
-        assert!(configure_project(&preferences, None, false, false));
+        assert!(configure_project(&preferences, None, false, false, ""));
         assert!(!tweening());
         assert_eq!(accent_color(), app_accent);
     }
