@@ -219,10 +219,7 @@ pub(crate) fn window_glass(
     glass_supported(compositor) && p.theme != "light" && !(p.theme == "system" && system_light)
 }
 /// What the compositor puts behind a window that does or doesn't paint glass.
-pub(crate) fn window_backdrop(
-    glass: bool,
-    compositor: &str,
-) -> gpui::WindowBackgroundAppearance {
+pub(crate) fn window_backdrop(glass: bool, compositor: &str) -> gpui::WindowBackgroundAppearance {
     if glass && glass_supported(compositor) {
         gpui::WindowBackgroundAppearance::Blurred
     } else {
