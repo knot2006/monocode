@@ -1,4 +1,4 @@
-name: Fork Release
+name: Fork Release (GPUI)
 
 on:
   push:
@@ -7,17 +7,21 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. fork-v0.16.0). Defaults to fork-v<version> from tauri.conf.json."
+        description: "Release tag (e.g. fork-v0.16.0-preview.1). Defaults to fork-v<version>-preview.<run_number>."
         required: false
         type: string
       prerelease:
-        description: "Mark GitHub Release as prerelease"
+        description: "Mark GitHub Release as prerelease (skips /releases/latest updater feed)"
         required: false
         type: boolean
         default: false
 
 permissions:
   contents: read
+
+concurrency:
+  group: fork-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   prepare:
@@ -41,11 +45,13 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          node <<'NODE'
-          const fs = require("node:fs");
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import { previewVersion } from "./scripts/package-native.mjs";
 
           const missingSecrets = [];
           if (!(process.env.TAURI_UPDATER_PUBKEY || "").trim()) {
@@ -59,14 +65,11 @@ jobs:
             process.exit(1);
           }
 
-          const confVersion = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
-          const pkgVersion = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
           const cargoToml = fs.readFileSync("Cargo.toml", "utf8");
           const workspaceMatch = cargoToml.match(/\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m);
-          const cargoVersion = workspaceMatch ? workspaceMatch[1] : "";
-
-          if (!confVersion || !pkgVersion || !cargoVersion) {
-            console.error("Failed to read version from src-tauri/tauri.conf.json, package.json, or Cargo.toml");
+          const baseVersion = workspaceMatch ? workspaceMatch[1] : "";
+          if (!baseVersion) {
+            console.error("Failed to read [workspace.package] version from Cargo.toml");
             process.exit(1);
           }
 
@@ -74,7 +77,7 @@ jobs:
           const tagName =
             process.env.GITHUB_EVENT_NAME === "push"
               ? process.env.GITHUB_REF_NAME
-              : inputTag || `fork-v${confVersion}`;
+              : inputTag || `fork-v${baseVersion}-preview.${process.env.GITHUB_RUN_NUMBER}`;
 
           if (!tagName.startsWith("fork-v")) {
             console.error(`Release tag must start with "fork-v", got: ${tagName}`);
@@ -82,19 +85,9 @@ jobs:
           }
 
           const version = tagName.slice("fork-v".length);
-          if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version)) {
-            console.error(`Invalid release version "${version}" derived from tag "${tagName}"`);
-            process.exit(1);
-          }
+          previewVersion(version);
 
-          if (version !== confVersion || version !== pkgVersion || version !== cargoVersion) {
-            console.error(
-              `Tag ${tagName} (${version}) does not match package.json (${pkgVersion}), Cargo.toml (${cargoVersion}), or src-tauri/tauri.conf.json (${confVersion})`,
-            );
-            process.exit(1);
-          }
-
-          const prerelease = process.env.INPUT_PRERELEASE === "true" || version.includes("-");
+          const prerelease = process.env.INPUT_PRERELEASE === "true";
           const updaterEndpoint = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/latest/download/latest.json`;
 
           fs.appendFileSync(
@@ -108,268 +101,159 @@ jobs:
           );
           NODE
 
-  windows:
-    name: Windows packages
+  build:
+    name: Native GPUI (${{ matrix.target }})
     needs: prepare
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            kind: linux
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: x86_64
+            kind: windows
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: 2
+      MONOCODE_NATIVE_VERSION: ${{ needs.prepare.outputs.version }}
+      MONOCODE_NATIVE_UPDATER_ENDPOINT: ${{ needs.prepare.outputs.updater_endpoint }}
+      MONOCODE_NATIVE_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: fork-release-windows
-
-      - run: npm ci
-
-      - name: Write updater release config
-        env:
-          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          TAURI_UPDATER_ENDPOINT: ${{ needs.prepare.outputs.updater_endpoint }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_PUBKEY)) {
-            throw "TAURI_UPDATER_PUBKEY is required"
-          }
-          if ([string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_ENDPOINT)) {
-            throw "TAURI_UPDATER_ENDPOINT is required"
-          }
-          $config = @{
-            bundle = @{
-              createUpdaterArtifacts = $true
-            }
-            plugins = @{
-              updater = @{
-                pubkey = $env:TAURI_UPDATER_PUBKEY
-                endpoints = @($env:TAURI_UPDATER_ENDPOINT)
-              }
-            }
-          }
-          $config | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 "$env:RUNNER_TEMP\tauri.release.conf.json"
-
-      - name: Build Windows packages
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-msvc"
-          npx tauri build --bundles nsis --config "$env:RUNNER_TEMP\tauri.release.conf.json"
-
-      - name: Stage Windows packages
-        run: |
-          $installers = @(Get-ChildItem "target/release/bundle/nsis" -Filter "*.exe")
-          $signatures = @(Get-ChildItem "target/release/bundle/nsis" -Filter "*.exe.sig")
-          if ($installers.Count -ne 1 -or $signatures.Count -ne 1) {
-            throw "Expected exactly one NSIS installer and one updater signature"
-          }
-          New-Item -ItemType Directory -Force "release-artifacts" | Out-Null
-          $artifacts = @($installers[0].FullName, $signatures[0].FullName)
-          Copy-Item -Path $artifacts -Destination "release-artifacts/"
-
-      - name: Upload Windows packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-packages
-          path: release-artifacts/
-          if-no-files-found: error
-
-  linux:
-    name: Linux packages
-    needs: prepare
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: fork-release-linux
-
-      - name: Install Linux system dependencies
-        run: bash scripts/install-linux-deps-debian.sh
-
-      - run: npm ci
-
-      - name: Write updater release config
-        env:
-          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
-          TAURI_UPDATER_ENDPOINT: ${{ needs.prepare.outputs.updater_endpoint }}
-        run: |
-          node <<'NODE'
-          const { writeFileSync } = require("node:fs");
-          const pubkey = process.env.TAURI_UPDATER_PUBKEY || "";
-          const endpoint = process.env.TAURI_UPDATER_ENDPOINT || "";
-          if (!pubkey || !endpoint) {
-            console.error("TAURI_UPDATER_PUBKEY and an updater endpoint are required");
-            process.exit(1);
-          }
-          writeFileSync(
-            process.env.RUNNER_TEMP + "/tauri.release.conf.json",
-            JSON.stringify(
-              { plugins: { updater: { pubkey, endpoints: [endpoint] } } },
-              null,
-              2,
-            ),
-          );
-          NODE
-
-      # Same as `npm run build:linux`, with the updater config merged in.
-      # npm would append extra args to the repack script, not tauri build.
-      - name: Build Linux packages
-        run: |
-          set -euo pipefail
-          npx tauri build --bundles deb,appimage --config "$RUNNER_TEMP/tauri.release.conf.json"
-          bash scripts/repack-appimage.sh
-
-      - name: Assert AppImage uses host libraries
-        run: bash scripts/assert-appimage-host-libs.sh
-
-      # Sign after repack-appimage.sh: a signature Tauri wrote during the
-      # build would cover the pre-repack file and fail updater verification.
-      - name: Sign AppImage for the updater
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          appimage=(target/release/bundle/appimage/*.AppImage)
-          if (( ${#appimage[@]} != 1 )); then
-            echo "Expected exactly one AppImage" >&2
-            exit 1
-          fi
-          npx tauri signer sign "${appimage[0]}"
-          test -s "${appimage[0]}.sig"
-
-      - name: Stage Linux packages
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          deb=(target/release/bundle/deb/*.deb)
-          appimage=(target/release/bundle/appimage/*.AppImage)
-          if (( ${#deb[@]} != 1 || ${#appimage[@]} != 1 )); then
-            echo "Expected exactly one .deb and one AppImage" >&2
-            exit 1
-          fi
-          if [[ ! -s "${appimage[0]}.sig" ]]; then
-            echo "Missing AppImage updater signature" >&2
-            exit 1
-          fi
-          mkdir -p release-artifacts
-          cp "${deb[0]}" "${appimage[0]}" "${appimage[0]}.sig" release-artifacts/
-
-      - name: Upload Linux packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-packages
-          path: release-artifacts/
-          if-no-files-found: error
-
-  linux-rpm:
-    name: Linux rpm package
-    needs: prepare
-    runs-on: ubuntu-latest
-    # Build on EL 10 so the published rpm's glibc requirement matches the
-    # oldest advertised target. Fedora 43 is newer and would install on EL 10
-    # while failing to load.
-    container: almalinux:10
-    steps:
-      # almalinux:10 ships no git, which actions/checkout otherwise has to work
-      # around with a REST API tarball download.
-      - name: Install git
-        run: dnf install -y git
-
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/monocode-gpui
+          key: fork-native-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Install native Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang cmake ninja-build pkg-config libfontconfig1-dev libfreetype6-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libasound2-dev libx11-xcb-dev libegl1-mesa-dev libvulkan-dev libdbus-1-dev squashfs-tools desktop-file-utils
+          curl --fail --location --retry 3 https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage -o "$RUNNER_TEMP/appimagetool"
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          echo "APPIMAGETOOL=$RUNNER_TEMP/appimagetool" >> "$GITHUB_ENV"
+
+      - name: Install native Windows packaging tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nsis --yes --no-progress
+          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          'RUSTFLAGS=-C target-feature=+crt-static' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build optimized native app
+        run: cargo build --locked --manifest-path crates/monocode-gpui/Cargo.toml -p monocode-gpui --target ${{ matrix.target }} --release
+
+      - name: Package native app
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINARY="crates/monocode-gpui/target/${{ matrix.target }}/release/monocode-gpui"
+          if [ "$RUNNER_OS" = Windows ]; then BINARY="$BINARY.exe"; fi
+          node scripts/package-native.mjs '${{ matrix.kind }}' "$BINARY" native-dist '${{ matrix.arch }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.target }}
+          path: |
+            native-dist/*.json
+            native-dist/*.AppImage
+            native-dist/*.deb
+            native-dist/*.exe
+          if-no-files-found: error
+
+  rpm:
+    name: Native GPUI (Enterprise Linux rpm)
+    needs: prepare
+    runs-on: ubuntu-latest
+    container: almalinux:10
+    env:
+      CARGO_BUILD_JOBS: 2
+      MONOCODE_NATIVE_VERSION: ${{ needs.prepare.outputs.version }}
+      MONOCODE_NATIVE_UPDATER_ENDPOINT: ${{ needs.prepare.outputs.updater_endpoint }}
+      MONOCODE_NATIVE_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+    steps:
+      - run: dnf install -y git
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install native rpm build dependencies
+        run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf install -y epel-release
+          dnf install -y clang gcc-c++ cmake ninja-build pkgconf-pkg-config fontconfig-devel freetype-devel libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel wayland-devel alsa-lib-devel libX11-devel libX11-xcb mesa-libEGL-devel vulkan-loader-devel dbus-devel rpm-build perl
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: fork-release-linux-rpm
+          workspaces: crates/monocode-gpui
+          key: fork-native-linux-rpm
+          cache-on-failure: true
 
-      - name: Install Enterprise Linux system dependencies
-        run: bash scripts/install-linux-deps-fedora.sh
+      - name: Build optimized native app
+        run: cargo build --locked --manifest-path crates/monocode-gpui/Cargo.toml -p monocode-gpui --release
 
-      - run: npm ci
+      - name: Package native rpm
+        run: node scripts/package-native.mjs rpm crates/monocode-gpui/target/release/monocode-gpui native-dist x86_64
 
-      - name: Build rpm package
-        run: npm run build:fedora
-
-      - name: Install and stage the generated rpm
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          bundle=(target/release/bundle/rpm/*.rpm)
-          if (( ${#bundle[@]} != 1 )); then
-            echo "Expected exactly one .rpm" >&2
-            exit 1
-          fi
-          # tauri-bundler derives rpm Requires only from
-          # bundle.linux.rpm.depends, and the setup script has already
-          # installed every -devel package, so assert the metadata directly.
-          requires="$(rpm -qp --requires "${bundle[0]}")"
-          for dep in webkit2gtk4.1 gtk3 libappindicator-gtk3 librsvg2 openssl-libs; do
-            if ! grep -qx "$dep" <<<"$requires"; then
-              echo "rpm is missing Requires: $dep" >&2
-              exit 1
-            fi
-          done
-          dnf install -y "${bundle[0]}"
-          rpm -q "$(rpm -qp --queryformat '%{NAME}' "${bundle[0]}")"
-          mkdir -p release-artifacts
-          cp "${bundle[0]}" release-artifacts/
-
-      - name: Upload rpm package
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: linux-rpm-package
-          path: release-artifacts/
+          name: native-linux-rpm
+          path: |
+            native-dist/*.json
+            native-dist/*.rpm
           if-no-files-found: error
 
   release:
-    name: Publish GitHub Release
-    needs: [prepare, windows, linux, linux-rpm]
+    name: Sign and publish GitHub Release
+    needs: [prepare, build, rpm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download Windows packages
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: windows-packages
-          path: artifacts/windows
+          persist-credentials: false
 
-      - name: Download Linux packages
-        uses: actions/download-artifact@v4
+      - uses: actions/setup-node@v4
         with:
-          name: linux-packages
-          path: artifacts/linux
+          node-version: 22
+          cache: npm
 
-      - name: Download Linux rpm package
-        uses: actions/download-artifact@v4
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
         with:
-          name: linux-rpm-package
-          path: artifacts/rpm
+          pattern: native-*
+          merge-multiple: true
+          path: native-dist
 
-      - name: Generate updater manifest and publish GitHub Release
+      - name: Sign native packages, generate updater manifest, and publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -378,83 +262,128 @@ jobs:
           TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
           VERSION: ${{ needs.prepare.outputs.version }}
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
 
-          EXES=(artifacts/windows/*.exe)
-          EXE_SIGS=(artifacts/windows/*.exe.sig)
-          DEBS=(artifacts/linux/*.deb)
-          APPIMAGES=(artifacts/linux/*.AppImage)
-          APPIMAGE_SIGS=(artifacts/linux/*.AppImage.sig)
-          RPMS=(artifacts/rpm/*.rpm)
+          node --input-type=module <<'NODE'
+          import { spawnSync } from "node:child_process";
+          import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+          import { basename, join, resolve } from "node:path";
 
-          if (( ${#EXES[@]} != 1 || ${#EXE_SIGS[@]} != 1 )); then
-            echo "Expected exactly one Windows installer and one updater signature" >&2
-            exit 1
-          fi
-          if (( ${#DEBS[@]} != 1 || ${#APPIMAGES[@]} != 1 || ${#APPIMAGE_SIGS[@]} != 1 )); then
-            echo "Expected exactly one .deb, one AppImage, and one AppImage signature" >&2
-            exit 1
-          fi
-          if (( ${#RPMS[@]} != 1 )); then
-            echo "Expected exactly one .rpm" >&2
-            exit 1
-          fi
+          const expectedTargets = [
+            "windows-x86_64-nsis",
+            "linux-x86_64-appimage",
+            "linux-x86_64-deb",
+            "linux-x86_64-rpm",
+          ];
 
-          EXE="${EXES[0]}"
-          EXE_SIG="${EXE_SIGS[0]}"
-          DEB="${DEBS[0]}"
-          APPIMAGE="${APPIMAGES[0]}"
-          APPIMAGE_SIG="${APPIMAGE_SIGS[0]}"
-          RPM="${RPMS[0]}"
-
-          EXE_SIG="$EXE_SIG" \
-          EXE_NAME="$(basename "$EXE")" \
-          APPIMAGE_SIG="$APPIMAGE_SIG" \
-          APPIMAGE_NAME="$(basename "$APPIMAGE")" \
-          node <<'NODE'
-          const fs = require("node:fs");
-
-          const base = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${process.env.TAG_NAME}`;
-          const manifest = {
-            version: process.env.VERSION,
-            notes: `MonoCode ${process.env.VERSION}`,
-            pub_date: new Date().toISOString(),
-            platforms: {
-              "windows-x86_64": {
-                signature: fs.readFileSync(process.env.EXE_SIG, "utf8").trim(),
-                url: `${base}/${encodeURIComponent(process.env.EXE_NAME)}`,
+          const directory = resolve("native-dist");
+          const sign = (filename) => {
+            const result = spawnSync(
+              process.execPath,
+              ["node_modules/@tauri-apps/cli/tauri.js", "signer", "sign", filename],
+              {
+                env: {
+                  ...process.env,
+                  CI: "true",
+                  TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+                    process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ?? "",
+                },
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "pipe"],
               },
-              // AppImage only: the installer-specific key keeps .deb and
-              // .rpm installs (which have no `linux-x86_64` entry) on
-              // their package manager instead of self-updating.
-              "linux-x86_64-appimage": {
-                signature: fs.readFileSync(process.env.APPIMAGE_SIG, "utf8").trim(),
-                url: `${base}/${encodeURIComponent(process.env.APPIMAGE_NAME)}`,
-              },
-            },
+            );
+            if (result.error || result.status !== 0) {
+              console.error(result.stderr || result.stdout || "");
+              throw new Error(`Could not sign ${basename(filename)}`);
+            }
+            return readFileSync(`${filename}.sig`, "utf8").trim();
           };
 
-          fs.writeFileSync("artifacts/latest.json", JSON.stringify(manifest, null, 2) + "\n");
+          const files = [];
+          const platforms = {};
+          const base = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${process.env.TAG_NAME}`;
+
+          for (const metadata of readdirSync(directory).filter((name) =>
+            /^artifacts-.*\.json$/.test(name),
+          )) {
+            for (const record of JSON.parse(
+              readFileSync(join(directory, metadata), "utf8"),
+            )) {
+              if (
+                basename(record.filename) !== record.filename ||
+                record.filename.includes("\\")
+              ) {
+                throw new Error(`Invalid artifact filename: ${record.filename}`);
+              }
+              if (files.includes(record.filename)) {
+                throw new Error(`Duplicate native artifact: ${record.filename}`);
+              }
+              files.push(record.filename);
+              if (record.target) {
+                if (
+                  !expectedTargets.includes(record.target) ||
+                  platforms[record.target]
+                ) {
+                  throw new Error(
+                    `Duplicate or unexpected native target: ${record.target}`,
+                  );
+                }
+                const filePath = join(directory, record.filename);
+                const signature = sign(filePath);
+                files.push(`${record.filename}.sig`);
+                platforms[record.target] = {
+                  url: `${base}/${encodeURIComponent(record.filename)}`,
+                  signature,
+                };
+              }
+            }
+          }
+
+          for (const target of expectedTargets) {
+            if (!platforms[target]) {
+              throw new Error(`Missing native package: ${target}`);
+            }
+          }
+
+          const manifest = {
+            app_id: "dev.usemono.gpui",
+            channel: "native-preview",
+            version: process.env.VERSION,
+            notes: `Monocode Native ${process.env.VERSION}`,
+            platforms,
+          };
+
+          const payload = Buffer.from(JSON.stringify(manifest));
+          const payloadPath = join(directory, "native-manifest.payload");
+          writeFileSync(payloadPath, payload);
+          const signature = sign(payloadPath);
+          writeFileSync(
+            join(directory, "latest.json"),
+            JSON.stringify({ payload: payload.toString("base64"), signature }) + "\n",
+          );
+          files.push("latest.json");
+          writeFileSync(
+            join(directory, "release-files.json"),
+            JSON.stringify(files, null, 2) + "\n",
+          );
           NODE
 
-          RELEASE_FILES=(
-            "$EXE"
-            "$EXE_SIG"
-            "$DEB"
-            "$APPIMAGE"
-            "$APPIMAGE_SIG"
-            "$RPM"
-            "artifacts/latest.json"
-          )
+          mapfile -t RELEASE_NAMES < <(node --input-type=module -e 'import { readFileSync } from "node:fs"; for (const file of JSON.parse(readFileSync("native-dist/release-files.json", "utf8"))) console.log(file);')
+          RELEASE_FILES=()
+          for name in "${RELEASE_NAMES[@]}"; do
+            RELEASE_FILES+=("native-dist/$name")
+          done
 
           if ! gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release create "$TAG_NAME" \
               --target "$GITHUB_SHA" \
               --draft \
               --prerelease="$PRERELEASE" \
-              --title "MonoCode $VERSION" \
+              --title "Monocode Native $VERSION" \
               --generate-notes
           fi
 
@@ -486,8 +415,6 @@ jobs:
 
           IS_DRAFT=$(gh release view "$TAG_NAME" --json isDraft --jq .isDraft)
           if [[ "$IS_DRAFT" == true ]]; then
-            # Draft assets can be replaced after an interrupted upload. A
-            # published release is immutable, so only resume drafts.
             gh release upload "$TAG_NAME" "${RELEASE_FILES[@]}" --clobber
             verify_release true
             gh release edit "$TAG_NAME" --draft=false --prerelease="$PRERELEASE"
