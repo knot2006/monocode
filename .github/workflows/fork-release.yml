@@ -122,6 +122,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fork-release-windows
+
       - run: npm ci
 
       - name: Write updater release config
@@ -187,6 +191,10 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fork-release-linux
 
       - name: Install Linux system dependencies
         run: bash scripts/install-linux-deps-debian.sh
@@ -292,6 +300,10 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fork-release-linux-rpm
 
       - name: Install Enterprise Linux system dependencies
         run: bash scripts/install-linux-deps-fedora.sh
