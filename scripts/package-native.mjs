@@ -30,6 +30,18 @@ export function previewVersion(version) {
     windows: match.slice(1).join("."),
   };
 }
+export function releaseVersion(version) {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(version);
+  if (match && match.slice(1).every((n) => Number(n) <= 65535)) {
+    return {
+      version,
+      base: version,
+      sequence: null,
+      windows: `${version}.0`,
+    };
+  }
+  return previewVersion(version);
+}
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
@@ -134,7 +146,10 @@ export async function packageNative({
   version,
   arch = "x86_64",
 }) {
-  const parsed = previewVersion(version);
+  const parsed =
+    process.env.MONOCODE_NATIVE_ALLOW_STABLE === "1"
+      ? releaseVersion(version)
+      : previewVersion(version);
   binary = resolve(binary);
   out = resolve(out);
   const embedded = run(binary, ["--version"], {
@@ -260,7 +275,7 @@ export async function packageNative({
     await mkdir(join(debRoot, "DEBIAN"));
     await writeFile(
       join(debRoot, "DEBIAN/control"),
-      `Package: monocode-native\nVersion: ${version.replace("-preview.", "~preview.")}\nArchitecture: amd64\nMaintainer: Monocode maintainers\nSection: devel\nPriority: optional\nDepends: libasound2, libfontconfig1, libfreetype6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libx11-xcb1, libxcb1, libxcb-shape0, libxcb-xfixes0, libxcb-randr0, libegl1, libvulkan1, libdbus-1-3, pkexec | policykit-1\nDescription: Monocode Native experimental preview\n`,
+      `Package: monocode-native\nVersion: ${parsed.sequence ? version.replace("-preview.", "~preview.") : version}\nArchitecture: amd64\nMaintainer: Monocode maintainers\nSection: devel\nPriority: optional\nDepends: libasound2, libfontconfig1, libfreetype6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libx11-xcb1, libxcb1, libxcb-shape0, libxcb-xfixes0, libxcb-randr0, libegl1, libvulkan1, libdbus-1-3, pkexec | policykit-1\nDescription: Monocode Native experimental preview\n`,
     );
     run("dpkg-deb", [
       "--build",
@@ -305,7 +320,7 @@ export async function packageNative({
     const spec = join(top, "SPECS/monocode-native.spec");
     await writeFile(
       spec,
-      `Name: monocode-native\nVersion: ${parsed.base}\nRelease: 0.preview.${parsed.sequence}%{?dist}\nSummary: Monocode Native experimental preview\nLicense: MIT AND Apache-2.0\nBuildArch: x86_64\nRequires: polkit\n%description\nMonocode Native experimental preview.\n%install\nmkdir -p %{buildroot}\ncp -a %{_sourcedir}/tree/. %{buildroot}/\n%files\n/usr/bin/monocode-native\n/usr/lib/monocode-native\n/usr/share/applications/dev.usemono.gpui.desktop\n/usr/share/icons/hicolor/256x256/apps/monocode-native.png\n`,
+      `Name: monocode-native\nVersion: ${parsed.base}\nRelease: ${parsed.sequence ? `0.preview.${parsed.sequence}%{?dist}` : "1%{?dist}"}\nSummary: Monocode Native experimental preview\nLicense: MIT AND Apache-2.0\nBuildArch: x86_64\nRequires: polkit\n%description\nMonocode Native experimental preview.\n%install\nmkdir -p %{buildroot}\ncp -a %{_sourcedir}/tree/. %{buildroot}/\n%files\n/usr/bin/monocode-native\n/usr/lib/monocode-native\n/usr/share/applications/dev.usemono.gpui.desktop\n/usr/share/icons/hicolor/256x256/apps/monocode-native.png\n`,
     );
     run("rpmbuild", [
       "--define",

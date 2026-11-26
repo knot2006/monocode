@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. fork-v0.16.0-preview.1). Defaults to fork-v<version>-preview.<run_number>."
+        description: "Release tag (e.g. fork-v0.16.1). Defaults to fork-v<version> from Cargo.toml."
         required: false
         type: string
       prerelease:
@@ -51,7 +51,7 @@ jobs:
         run: |
           node --input-type=module <<'NODE'
           import fs from "node:fs";
-          import { previewVersion } from "./scripts/package-native.mjs";
+          import { releaseVersion } from "./scripts/package-native.mjs";
 
           const missingSecrets = [];
           if (!(process.env.TAURI_UPDATER_PUBKEY || "").trim()) {
@@ -77,7 +77,7 @@ jobs:
           const tagName =
             process.env.GITHUB_EVENT_NAME === "push"
               ? process.env.GITHUB_REF_NAME
-              : inputTag || `fork-v${baseVersion}-preview.${process.env.GITHUB_RUN_NUMBER}`;
+              : inputTag || `fork-v${baseVersion}`;
 
           if (!tagName.startsWith("fork-v")) {
             console.error(`Release tag must start with "fork-v", got: ${tagName}`);
@@ -85,7 +85,7 @@ jobs:
           }
 
           const version = tagName.slice("fork-v".length);
-          previewVersion(version);
+          releaseVersion(version);
 
           const prerelease = process.env.INPUT_PRERELEASE === "true";
           const updaterEndpoint = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/latest/download/latest.json`;
@@ -119,6 +119,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       CARGO_BUILD_JOBS: 2
+      MONOCODE_NATIVE_ALLOW_STABLE: "1"
       MONOCODE_NATIVE_VERSION: ${{ needs.prepare.outputs.version }}
       MONOCODE_NATIVE_UPDATER_ENDPOINT: ${{ needs.prepare.outputs.updater_endpoint }}
       MONOCODE_NATIVE_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
@@ -186,6 +187,7 @@ jobs:
     container: almalinux:10
     env:
       CARGO_BUILD_JOBS: 2
+      MONOCODE_NATIVE_ALLOW_STABLE: "1"
       MONOCODE_NATIVE_VERSION: ${{ needs.prepare.outputs.version }}
       MONOCODE_NATIVE_UPDATER_ENDPOINT: ${{ needs.prepare.outputs.updater_endpoint }}
       MONOCODE_NATIVE_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
@@ -353,7 +355,7 @@ jobs:
             app_id: "dev.usemono.gpui",
             channel: "native-preview",
             version: process.env.VERSION,
-            notes: `Monocode Native ${process.env.VERSION}`,
+            notes: `MonoCode ${process.env.VERSION}`,
             platforms,
           };
 
@@ -383,7 +385,7 @@ jobs:
               --target "$GITHUB_SHA" \
               --draft \
               --prerelease="$PRERELEASE" \
-              --title "Monocode Native $VERSION" \
+              --title "MonoCode $VERSION" \
               --generate-notes
           fi
 
